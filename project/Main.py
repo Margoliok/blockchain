@@ -1,7 +1,10 @@
 import hashlib
 import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives import serialization, hashes
+import json
 
 
 # Utility function to hash data
@@ -21,14 +24,57 @@ def merkle_root(transactions):
     return hashes[0]
 
 
+# Generate RSA key pair
+def generate_key_pair():
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048
+    )
+    public_key = private_key.public_key()
+    return private_key, public_key
+
+
+# Digital signature function
+def sign_data(private_key, data):
+    data_bytes = json.dumps(data, sort_keys=True).encode()
+    signature = private_key.sign(
+        data_bytes,
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.MAX_LENGTH
+        ),
+        hashes.SHA256()
+    )
+    return signature.hex()
+
+
+# Verify signature
+def verify_signature(public_key, data, signature):
+    data_bytes = json.dumps(data, sort_keys=True).encode()
+    try:
+        public_key.verify(
+            bytes.fromhex(signature),
+            data_bytes,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+        return True
+    except:
+        return False
+
+
 # Transaction structure
 class Transaction:
-    def __init__(self, sender, receiver, amount):
+    def __init__(self, sender, receiver, amount, private_key):
         self.sender = sender
         self.receiver = receiver
         self.amount = amount
         self.timestamp = time.time()
         self.tx_hash = self.calculate_hash()
+        self.signature = sign_data(private_key, self.to_dict())
 
     def calculate_hash(self):
         data = f"{self.sender}{self.receiver}{self.amount}{self.timestamp}"
@@ -121,23 +167,41 @@ def validate_block(block, utxo):
     return True, "Valid Block"
 
 
+# Wallet GUI
+class WalletGUI:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("Blockchain Wallet")
+
+        self.private_key, self.public_key = generate_key_pair()
+        self.address = self.public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        ).decode()
+
+        tk.Label(self.root, text="Your Wallet Address:").pack()
+
+        # Fix: Separate widget creation, text insertion, and packing
+        text_widget = tk.Text(self.root, height=5, width=60)
+        text_widget.insert(tk.END, self.address)
+        text_widget.pack()
+
+        self.balance_label = tk.Label(self.root, text="Balance: 100")
+        self.balance_label.pack()
+
+        tk.Button(self.root, text="Send Transaction", command=self.send_transaction).pack()
+
+    def send_transaction(self):
+        receiver = "Bob"
+        amount = 30
+        transaction = Transaction(self.address, receiver, amount, self.private_key)
+        messagebox.showinfo("Transaction Sent", f"Sent {amount} to {receiver}\nTx Hash: {transaction.tx_hash}")
+
+    def run(self):
+        self.root.mainloop()
+
+
 # Main execution
 if __name__ == "__main__":
-    # Create transactions
-    tx1 = Transaction("Alice", "Bob", 30)
-    tx2 = Transaction("Bob", "Charlie", 20)
-    tx3 = Transaction("Charlie", "Dave", 50)
-
-    # Validate transactions and create block
-    utxo = UTXO()
-    transactions = [tx1, tx2, tx3]
-
-    if utxo.update_balances(transactions):
-        block1 = Block("previous_block_hash", transactions)
-        print(block1.to_dict())
-
-        # Launch GUI Explorer
-        explorer = BlockchainExplorer([block1])
-        explorer.run()
-    else:
-        print("Invalid Transactions")
+    wallet = WalletGUI()
+    wallet.run()
