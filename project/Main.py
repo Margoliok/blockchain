@@ -1,137 +1,143 @@
 import time
-import socket
-import json
-import threading
+import tkinter as tk
+from tkinter import ttk
 
 
-# Manual hash function (instead of hashlib)
-def manual_hash(data):
-    hash_value = 0
-    for char in data:
-        hash_value = (hash_value * 31 + ord(char)) % (2 ** 32)
-    return str(hash_value)
+def sha256(data):
+    constants = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    ]
+    return hex(sum(ord(c) for c in data) % (2 ** 256))[2:]
 
 
-# Transaction class
+class ProofOfWork:
+    def __init__(self, difficulty):
+        self.difficulty = difficulty
+
+    def mine_block(self, block):
+        block.nonce = 0
+        while not self.is_valid_proof(block):
+            block.nonce += 1
+        return block
+
+    def is_valid_proof(self, block):
+        hash_value = sha256(f"{block.previous_hash}{block.merkle_root}{block.timestamp}{block.nonce}")
+        return hash_value[:self.difficulty] == "0" * self.difficulty
+
+
+class MerkleTree:
+    @staticmethod
+    def merkle_root(transactions):
+        if len(transactions) == 0:
+            return None
+        hashes = [sha256(tx.tx_hash) for tx in transactions]
+        while len(hashes) > 1:
+            if len(hashes) % 2 == 1:
+                hashes.append(hashes[-1])
+            hashes = [sha256(hashes[i] + hashes[i + 1]) for i in range(0, len(hashes), 2)]
+        return hashes[0]
+
+
 class Transaction:
-    def __init__(self, sender, receiver, amount, timestamp=None, tx_hash=None):
+    def __init__(self, sender, receiver, amount, fee=1):
         self.sender = sender
         self.receiver = receiver
         self.amount = amount
-        self.timestamp = timestamp if timestamp else time.time()
-        self.tx_hash = tx_hash if tx_hash else self.calculate_hash()
+        self.fee = fee
+        self.timestamp = time.time()
+        self.tx_hash = self.calculate_hash()
 
     def calculate_hash(self):
-        return manual_hash(f"{self.sender}{self.receiver}{self.amount}{self.timestamp}")
-
-    def to_dict(self):
-        return {
-            "sender": self.sender,
-            "receiver": self.receiver,
-            "amount": self.amount,
-            "timestamp": self.timestamp,
-            "tx_hash": self.tx_hash
-        }
+        data = f"{self.sender}{self.receiver}{self.amount}{self.fee}{self.timestamp}"
+        return sha256(data)
 
 
-# Merkle Root Calculation
-def merkle_root(transaction_hashes):
-    if not transaction_hashes:
-        return None
-
-    while len(transaction_hashes) > 1:
-        if len(transaction_hashes) % 2 == 1:
-            transaction_hashes.append(transaction_hashes[-1])
-        transaction_hashes = [manual_hash(transaction_hashes[i] + transaction_hashes[i + 1])
-                              for i in range(0, len(transaction_hashes), 2)]
-    return transaction_hashes[0]
-
-
-# Block class
 class Block:
-    def __init__(self, previous_hash, transactions, timestamp=None, merkle_root=None, block_hash=None):
+    def __init__(self, previous_hash, transactions, miner_address):
         self.previous_hash = previous_hash
-        self.transactions = [Transaction(**tx) if isinstance(tx, dict) else tx for tx in transactions]
-        self.timestamp = timestamp if timestamp else time.time()
-        self.merkle_root = merkle_root if merkle_root else self.compute_merkle_root()
-        self.block_hash = block_hash if block_hash else self.calculate_hash()
+        self.transactions = transactions
+        self.merkle_root = MerkleTree.merkle_root(transactions)
+        self.timestamp = time.time()
+        self.nonce = 0
+        self.miner_address = miner_address
+        self.hash = None
 
-    def compute_merkle_root(self):
-        return merkle_root([tx.tx_hash for tx in self.transactions])
-
-    def calculate_hash(self):
-        return manual_hash(f"{self.previous_hash}{self.merkle_root}{self.timestamp}")
-
-    def to_dict(self):
-        return {
-            "previous_hash": self.previous_hash,
-            "merkle_root": self.merkle_root,
-            "timestamp": self.timestamp,
-            "block_hash": self.block_hash,
-            "transactions": [tx.to_dict() for tx in self.transactions]
-        }
+    def finalize(self):
+        self.hash = sha256(f"{self.previous_hash}{self.merkle_root}{self.timestamp}{self.nonce}")
 
 
-# P2P Networking
-class Node:
-    def __init__(self, host, port):
-        self.host = host
-        self.port = port
-        self.transactions = []
-        self.blockchain = []
-        self.peers = []
-        threading.Thread(target=self.start_server).start()
+class UTXO:
+    def __init__(self):
+        self.balances = {}
 
-    def start_server(self):
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.bind((self.host, self.port))
-        server.listen(5)
-        while True:
-            client, _ = server.accept()
-            threading.Thread(target=self.handle_connection, args=(client,)).start()
+    def update_balances(self, transactions, miner):
+        for tx in transactions:
+            self.balances.setdefault(tx.sender, 100)
+            self.balances.setdefault(tx.receiver, 100)
+            self.balances.setdefault(miner, 0)
 
-    def handle_connection(self, client):
-        try:
-            data = client.recv(1024).decode()
-            message = json.loads(data)
-            if message["type"] == "transaction":
-                self.transactions.append(Transaction(**message["data"]))
-            elif message["type"] == "block":
-                self.blockchain.append(Block(**message["data"]))
-        except Exception as e:
-            print(f"Error handling connection: {e}")
-        finally:
-            client.close()
+            if self.balances[tx.sender] < (tx.amount + tx.fee):
+                return False  # Invalid transaction
 
-    def send_data(self, peer, data):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.connect(peer)
-                s.sendall(json.dumps(data).encode())
-        except Exception as e:
-            print(f"Error sending data: {e}")
-
-    def broadcast_transaction(self, transaction):
-        for peer in self.peers:
-            self.send_data(peer, {"type": "transaction", "data": transaction.to_dict()})
-
-    def broadcast_block(self, block):
-        for peer in self.peers:
-            self.send_data(peer, {"type": "block", "data": block.to_dict()})
+            self.balances[tx.sender] -= (tx.amount + tx.fee)
+            self.balances[tx.receiver] += tx.amount
+            self.balances[miner] += tx.fee
+        return True
 
 
-# Example execution
+
+def mine_block(previous_hash, transactions, miner_address, pow_system):
+    block = Block(previous_hash, transactions, miner_address)
+    block = pow_system.mine_block(block)
+    block.finalize()
+    return block
+
+
+def resolve_conflicts(blockchain1, blockchain2):
+    return blockchain1 if len(blockchain1) >= len(blockchain2) else blockchain2
+
+
+class BlockchainExplorer:
+    def __init__(self, blocks):
+        self.blocks = blocks
+        self.root = tk.Tk()
+        self.root.title("Blockchain Explorer")
+        self.tree = ttk.Treeview(self.root, columns=("Hash", "Merkle Root", "Transactions"), show="headings")
+        self.tree.heading("Hash", text="Block Hash")
+        self.tree.heading("Merkle Root", text="Merkle Root")
+        self.tree.heading("Transactions", text="Transactions Count")
+        self.tree.pack(expand=True, fill="both")
+        self.populate_tree()
+
+    def populate_tree(self):
+        for block in self.blocks:
+            self.tree.insert("", "end", values=(block.hash, block.merkle_root, len(block.transactions)))
+
+    def run(self):
+        self.root.mainloop()
+
+
 if __name__ == "__main__":
-    node1 = Node("localhost", 5001)
-    node2 = Node("localhost", 5002)
-    node1.peers.append(("localhost", 5002))
-    node2.peers.append(("localhost", 5001))
+    difficulty = 3
+    pow_system = ProofOfWork(difficulty)
+    utxo = UTXO()
 
-    tx1 = Transaction("Alice", "Bob", 10)
-    node1.broadcast_transaction(tx1)
-    time.sleep(1)
-    block1 = Block("genesis_hash", [tx1])
-    node1.broadcast_block(block1)
-    time.sleep(1)
-    print("Alice's balance:", 100 - 10)
-    print("Bob's balance:", 100 + 10)
+    tx1 = Transaction("Alice", "Bob", 30, 2)
+    tx2 = Transaction("Bob", "Charlie", 20, 1)
+    tx3 = Transaction("Charlie", "Dave", 50, 3)
+
+    transactions = [tx1, tx2, tx3]
+    miner1, miner2 = "Miner1", "Miner2"
+
+    if utxo.update_balances(transactions, miner1):
+        chain1 = [mine_block("genesis_hash", transactions, miner1, pow_system)]
+    if utxo.update_balances(transactions, miner2):
+        chain2 = [mine_block("genesis_hash", transactions, miner2, pow_system)]
+
+    final_chain = resolve_conflicts(chain1, chain2)
+
+    for block in final_chain:
+        print(block.__dict__)
+    explorer = BlockchainExplorer(final_chain)
+    explorer.run()
